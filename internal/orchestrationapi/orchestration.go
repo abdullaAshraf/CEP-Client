@@ -50,6 +50,7 @@ type Orche interface {
 // OrcheExternalAPI is the interface implemented by external REST API
 type OrcheExternalAPI interface {
 	RequestService(serviceInfo ReqeustService) ResponseService
+	RequestServiceCenterlized(appInfo map[string]interface{})
 	verifier.VerifierConf
 }
 
@@ -73,6 +74,7 @@ var (
 
 func init() {
 	orcheIns = new(orcheImpl)
+	orcheIns.SetupServerCommunication()
 	orcheIns.networkhelper = networkhelper.GetInstance()
 }
 

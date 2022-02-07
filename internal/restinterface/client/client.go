@@ -33,9 +33,15 @@ type Clienter interface {
 	// for scoringmgr
 	DoGetScoreRemoteDevice(devID string, endpoint string) (scoreValue float64, err error)
 	DoGetResourceRemoteDevice(devID string, endpoint string) (respMsg map[string]interface{}, err error)
+
 	// for discoverymgr
 	DoGetOrchestrationInfo(endpoint string) (platform string, executionType string, serviceList []string, err error)
 	DoNotifyMNEDCBroadcastServer(endpoint string, port int, deviceID string, privateIP string, virtualIP string) error
+
+	// for cloudServer
+	DoRegisterClusterWithServer() (respMsg map[string]interface{}, err error)
+	DoExecuteCloudScheduler(sericeRequest map[string]interface{}) (executionUUID string, err error)
+	DoServerCheckup(benchmarks map[string]interface{}) (respMsg map[string]interface{}, err error)
 }
 
 // Setter interface

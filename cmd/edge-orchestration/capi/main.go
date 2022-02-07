@@ -221,6 +221,8 @@ func OrchestrationInit() C.int {
 	}
 	ehandle := externalhandler.GetHandler()
 	ehandle.SetOrchestrationAPI(externalapi)
+	//to have a centerlized controller
+	ihandle.SetOrchestrationExternalAPI(externalapi)
 	ehandle.SetCipher(dummy.GetCipher(cipherKeyFilePath))
 	restEdgeRouter.Add(ehandle)
 

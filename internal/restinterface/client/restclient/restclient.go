@@ -21,8 +21,10 @@ package restclient
 import (
 	"errors"
 	"fmt"
-	"github.com/lf-edge/edge-home-orchestration-go/internal/common/logmgr"
 	"net/http"
+	"strconv"
+
+	"github.com/lf-edge/edge-home-orchestration-go/internal/common/logmgr"
 
 	"github.com/lf-edge/edge-home-orchestration-go/internal/restinterface/cipher"
 	"github.com/lf-edge/edge-home-orchestration-go/internal/restinterface/client"
@@ -43,6 +45,7 @@ const (
 	constWellknownPort = 56001
 	constInternalPort  = 56002
 	logPrefix          = "[restclient]"
+	cloudServerHost    = "https://peaceful-brushlands-26273.herokuapp.com"
 )
 
 var (
@@ -60,6 +63,93 @@ func init() {
 // GetRestClient returns the singleton restClientImpl instance
 func GetRestClient() client.Clienter {
 	return restClient
+}
+
+// DoRegisterClusterWithServer sends request to cloud server to register cluster and get uuid for further communication and cron expression
+func (c restClientImpl) DoRegisterClusterWithServer() (respMsg map[string]interface{}, err error) {
+	log.Printf("%s DoRegisterClusterWithServer :", logPrefix)
+	if !c.IsSetKey {
+		return respMsg, errors.New(logPrefix + " does not set key")
+	}
+
+	restapi := "/cluster"
+
+	targetURL := cloudServerHost + restapi
+
+	respBytes, code, err := c.helper.DoPost(targetURL, make([]byte, 0))
+	if err != nil || code != http.StatusOK {
+		return respMsg, errors.New(logPrefix + " post return with code: " + strconv.Itoa(code) + " error: " + err.Error())
+	}
+
+	respMsg, err = c.Key.DecryptByteToJSON(respBytes)
+	if err != nil {
+		return respMsg, errors.New(logPrefix + " can not decrytion " + err.Error())
+	}
+	log.Printf("%s respMsg From [%v] : %v", logPrefix, respMsg)
+
+	return
+}
+
+// DoExecuteCloudScheduler sends service request to cloud server to schedule a service on a device in a different cluster
+func (c restClientImpl) DoExecuteCloudScheduler(sericeRequest map[string]interface{}) (executionUUID string, err error) {
+	log.Printf("%s DoExecuteCloudScheduler :", logPrefix)
+	if !c.IsSetKey {
+		return executionUUID, errors.New(logPrefix + " does not set key")
+	}
+
+	restapi := "/service"
+
+	targetURL := cloudServerHost + restapi
+
+	encryptBytes, err := c.Key.EncryptJSONToByte(sericeRequest)
+	if err != nil {
+		return executionUUID, errors.New(logPrefix + " can not encryption " + err.Error())
+	}
+
+	respBytes, code, err := c.helper.DoPost(targetURL, encryptBytes)
+	if err != nil || code != http.StatusOK {
+		return executionUUID, errors.New(logPrefix + " post return error")
+	}
+
+	respMsg, err := c.Key.DecryptByteToJSON(respBytes)
+	if err != nil {
+		return executionUUID, errors.New(logPrefix + " can not decrytion " + err.Error())
+	}
+	log.Printf("%s respMsg From [%v] : %v", logPrefix, respMsg)
+
+	//executionUUID = respMsg;
+
+	return
+}
+
+// DoServerCheckup sends update about clister devices and benchmarks, and recieve services assigned by the scheduler for those devices if any
+func (c restClientImpl) DoServerCheckup(benchmarks map[string]interface{}) (respMsg map[string]interface{}, err error) {
+	log.Printf("%s DoServerCheckup :", logPrefix)
+	if !c.IsSetKey {
+		return respMsg, errors.New(logPrefix + " does not set key")
+	}
+
+	restapi := "/service"
+
+	targetURL := cloudServerHost + restapi
+
+	encryptBytes, err := c.Key.EncryptJSONToByte(benchmarks)
+	if err != nil {
+		return respMsg, errors.New(logPrefix + " can not encryption " + err.Error())
+	}
+
+	respBytes, code, err := c.helper.DoGetWithBody(targetURL, encryptBytes)
+	if err != nil || code != http.StatusOK {
+		return respMsg, errors.New(logPrefix + " post return error")
+	}
+
+	respMsg, err = c.Key.DecryptByteToJSON(respBytes)
+	if err != nil {
+		return respMsg, errors.New(logPrefix + " can not decrytion " + err.Error())
+	}
+	log.Printf("%s respMsg From [%v] : %v", logPrefix, respMsg)
+
+	return
 }
 
 // DoExecuteRemoteDevice sends request to remote orchestration (APIV1ServicemgrServicesPost) to execute service

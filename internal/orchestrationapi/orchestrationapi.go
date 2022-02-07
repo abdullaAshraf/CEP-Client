@@ -38,6 +38,7 @@ import (
 	sysDB "github.com/lf-edge/edge-home-orchestration-go/internal/db/bolt/system"
 	dbhelper "github.com/lf-edge/edge-home-orchestration-go/internal/db/helper"
 	"github.com/lf-edge/edge-home-orchestration-go/internal/restinterface/client"
+	"github.com/robfig/cron"
 )
 
 type orcheImpl struct {
@@ -62,11 +63,17 @@ type deviceInfo struct {
 	execType string
 }
 
+type forwardNotification struct {
+	targetURL string
+	serviceId float64
+}
+
 type orcheClient struct {
 	appName   string
 	args      []string
 	notiChan  chan string
 	endSignal chan bool
+	forward   forwardNotification
 }
 
 // RequestServiceInfo struct
@@ -118,12 +125,150 @@ var (
 	sysDBExecutor sysDB.DBInterface
 
 	helper dbhelper.MultipleBucketQuery
+
+	clusterUUID string = ""
 )
 
 func init() {
 	sysDBExecutor = sysDB.Query{}
 
 	helper = dbhelper.GetInstance()
+}
+
+func (orcheEngine *orcheImpl) SetupServerCommunication() {
+	response, err := orcheEngine.clientAPI.DoRegisterClusterWithServer()
+
+	if err != nil {
+		log.Println("[orchestrationapi] cannot register cluster with cloud server because of", err.Error())
+		return
+	}
+
+	clusterUUID = response["uuid"].(string)
+	orcheEngine.SetupCheckupCycle(response["cycle"].(string))
+}
+
+func (orcheEngine *orcheImpl) SetupCheckupCycle(cronCycleExpression string) {
+	c := cron.New()
+	c.AddFunc(cronCycleExpression, func() {
+		log.Println("Triggered checkup")
+		orcheEngine.CloudCheckup()
+	})
+}
+
+func (orcheEngine *orcheImpl) RequestServiceCloud(serviceName string, args []string, requesterId string) {
+	if !orcheEngine.Ready {
+		log.Printf("[%s] orcheEngine not ready", "RequestServiceCloud")
+		return
+	}
+
+	serviceRequest := map[string]interface{}{
+		"clusterId": clusterUUID,
+		"deviceId":  requesterId,
+		"name":      serviceName,
+		"command":   args,
+	}
+
+	executionUUID, err := orcheEngine.clientAPI.DoExecuteCloudScheduler(serviceRequest)
+	if err != nil {
+		log.Println("[orchestrationapi] cannot request service from server because of", err.Error())
+		return
+	}
+
+	log.Println(executionUUID)
+	//TODO: keep executionUUID for notifications and update finish endpoint later
+}
+
+func (orcheEngine *orcheImpl) CloudCheckup() (err error) {
+	if !orcheEngine.Ready {
+		log.Printf("[%s] orcheEngine not ready", "CloudCheckup")
+		return
+	}
+
+	candidates, err := orcheEngine.getCandidate("", []string{"container"})
+
+	if err != nil {
+		log.Printf("[%s] error getting candidate %s", "RequestServiceCenterlized", err.Error())
+		return err
+	}
+
+	deviceResources := orcheEngine.gatherDevicesResource(candidates, true)
+	if len(deviceResources) <= 0 {
+		return errors.New("no suitable device found")
+	}
+	for i, dev := range deviceResources {
+		deviceResources[i].score, _ = orcheEngine.GetScoreWithResource(dev.resource)
+	}
+
+	benchmarks := make(map[string][]interface{})
+	log.Printf("[RequestService] CloudCheckup")
+	for index, candidate := range deviceResources {
+		benchmarks[candidate.id] = append(benchmarks[candidate.id], candidate.resource)
+		log.Printf("[%d] Id       : %v", index, candidate.id)
+		log.Printf("[%d] Resource : %v", index, candidate.resource)
+		log.Printf("[%d] Score : %v", index, candidate.score)
+		log.Printf("")
+	}
+
+	requestBody := map[string]interface{}{
+		"clusterId":  clusterUUID,
+		"benchmarks": benchmarks,
+	}
+
+	response, err := orcheEngine.clientAPI.DoServerCheckup(requestBody)
+	if err != nil {
+		log.Println("[orchestrationapi] cannot checkup on server because of", err.Error())
+		return
+	}
+
+	for key, element := range response {
+		log.Printf("[%v] Id       : %v", key, element)
+		//TODO: call executeApp to pass recieved tasks to the selected device
+		//orcheEngine.executeApp()
+	}
+	//TODO: call finished endpoint on service done
+
+	return nil
+}
+
+// RequestServiceCenterlized handles service request (ex. offloading) from other workers on the network
+func (orcheEngine *orcheImpl) RequestServiceCenterlized(appInfo map[string]interface{}) {
+
+	serviceName := appInfo["ServiceName"].(string)
+
+	if !orcheEngine.Ready {
+		log.Printf("[%s] orcheEngine not ready", "RequestServiceCenterlized")
+		return
+	}
+
+	atomic.AddInt32(&orchClientID, 1)
+
+	handle := int(orchClientID)
+
+	forward := forwardNotification{appInfo["NotificationTargetURL"].(string), appInfo["ServiceID"].(float64)}
+	serviceClient := addServiceClient(handle, serviceName, forward)
+	go serviceClient.listenNotify(orcheEngine.notificationIns)
+
+	executionTypes := make([]string, 0)
+
+	args := make([]string, 0)
+	for _, arg := range appInfo["UserArgs"].([]interface{}) {
+		args = append(args, arg.(string))
+	}
+	executionTypes = append(executionTypes, args[len(args)-1])
+
+	device, err := orcheEngine.scheduleService(serviceName, executionTypes, "device", true)
+	if err != nil {
+		orcheEngine.RequestServiceCloud(serviceName, args, appInfo["Requester"].(string))
+		return
+	}
+
+	orcheEngine.executeApp(
+		device.endpoint,
+		serviceName,
+		appInfo["Requester"].(string),
+		args,
+		serviceClient.notiChan,
+	)
 }
 
 // RequestService handles service request (ex. offloading) from service application
@@ -142,8 +287,8 @@ func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) Respons
 
 	handle := int(orchClientID)
 
-	serviceClient := addServiceClient(handle, serviceInfo.ServiceName)
-	go serviceClient.listenNotify()
+	serviceClient := addServiceClient(handle, serviceInfo.ServiceName, forwardNotification{})
+	go serviceClient.listenNotify(orcheEngine.notificationIns)
 
 	executionTypes := make([]string, 0)
 	var scoringType string
@@ -152,16 +297,7 @@ func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) Respons
 		scoringType, _ = info.ExeOption["scoringType"].(string)
 	}
 
-	candidates, err := orcheEngine.getCandidate(serviceInfo.ServiceName, executionTypes)
-
-	log.Printf("[RequestService] getCandidate")
-	for index, candidate := range candidates {
-		log.Printf("[%d] Id       : %v", index, candidate.Id)
-		log.Printf("[%d] ExecType : %v", index, candidate.ExecType)
-		log.Printf("[%d] Endpoint : %v", index, candidate.Endpoint)
-		log.Printf("")
-	}
-
+	device, err := orcheEngine.scheduleService(serviceInfo.ServiceName, executionTypes, scoringType, serviceInfo.SelfSelection)
 	if err != nil {
 		return ResponseService{
 			Message:          err.Error(),
@@ -170,47 +306,23 @@ func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) Respons
 		}
 	}
 
-	errorResp := ResponseService{
-		Message:          ServiceNotFound,
-		ServiceName:      serviceInfo.ServiceName,
-		RemoteTargetInfo: TargetInfo{},
-	}
-
-	var deviceScores []deviceInfo
-
-	if scoringType == "resource" {
-		deviceResources := orcheEngine.gatherDevicesResource(candidates, serviceInfo.SelfSelection)
-		if len(deviceResources) <= 0 {
-			return errorResp
-		}
-		for i, dev := range deviceResources {
-			deviceResources[i].score, _ = orcheEngine.GetScoreWithResource(dev.resource)
-		}
-		deviceScores = sortByScore(deviceResources)
-	} else {
-		deviceScores = sortByScore(orcheEngine.gatherDevicesScore(candidates, serviceInfo.SelfSelection))
-	}
-
-	if len(deviceScores) <= 0 {
-		return errorResp
-	} else if deviceScores[0].score == scoringmgr.InvalidScore {
-		return errorResp
-	}
-
-	args, err := getExecCmds(deviceScores[0].execType, serviceInfo.ServiceInfo)
+	args, err := getExecCmds(device.execType, serviceInfo.ServiceInfo)
 	if err != nil {
 		log.Println(err.Error())
-		errorResp.Message = err.Error()
-		return errorResp
+		return ResponseService{
+			Message:          err.Error(),
+			ServiceName:      serviceInfo.ServiceName,
+			RemoteTargetInfo: TargetInfo{},
+		}
 	}
-	args = append(args, deviceScores[0].execType)
+	args = append(args, device.execType)
 
 	localhosts, err := orcheEngine.networkhelper.GetIPs()
 	if err != nil {
 		log.Println("[orchestrationapi] localhost ip gettering fail. maybe skipped localhost")
 	}
 
-	if common.HasElem(localhosts, deviceScores[0].endpoint) {
+	if common.HasElem(localhosts, device.endpoint) {
 		validator := commandvalidator.CommandValidator{}
 		for _, info := range serviceInfo.ServiceInfo {
 			if info.ExecutionType == "native" || info.ExecutionType == "android" {
@@ -227,7 +339,7 @@ func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) Respons
 
 		vRequester := requestervalidator.RequesterValidator{}
 		if err := vRequester.CheckRequester(serviceInfo.ServiceName, serviceInfo.ServiceRequester); err != nil &&
-			(deviceScores[0].execType == "native" || deviceScores[0].execType == "android") {
+			(device.execType == "native" || device.execType == "android") {
 			log.Println(err.Error())
 			return ResponseService{
 				Message:          err.Error(),
@@ -238,22 +350,62 @@ func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) Respons
 	}
 
 	orcheEngine.executeApp(
-		deviceScores[0].endpoint,
+		device.endpoint,
 		serviceInfo.ServiceName,
 		serviceInfo.ServiceRequester,
 		args,
 		serviceClient.notiChan,
 	)
-	log.Println("[orchestrationapi] ", deviceScores)
 
 	return ResponseService{
 		Message:     ErrorNone,
 		ServiceName: serviceInfo.ServiceName,
 		RemoteTargetInfo: TargetInfo{
-			ExecutionType: deviceScores[0].execType,
-			Target:        deviceScores[0].endpoint,
+			ExecutionType: device.execType,
+			Target:        device.endpoint,
 		},
 	}
+}
+
+func (orcheEngine *orcheImpl) scheduleService(serviceName string, executionTypes []string, scoringType string, selfSelection bool) (device deviceInfo, err error) {
+	candidates, err := orcheEngine.getCandidate(serviceName, executionTypes)
+
+	log.Printf("[RequestService] getCandidate")
+	for index, candidate := range candidates {
+		log.Printf("[%d] Id       : %v", index, candidate.Id)
+		log.Printf("[%d] ExecType : %v", index, candidate.ExecType)
+		log.Printf("[%d] Endpoint : %v", index, candidate.Endpoint)
+		log.Printf("")
+	}
+
+	if err != nil {
+		log.Printf("[%s] error getting candidate %s", "RequestServiceCenterlized", err.Error())
+		return deviceInfo{}, err
+	}
+
+	var deviceScores []deviceInfo
+
+	if scoringType == "resource" {
+		deviceResources := orcheEngine.gatherDevicesResource(candidates, selfSelection)
+		if len(deviceResources) <= 0 {
+			return deviceInfo{}, errors.New(ServiceNotFound)
+		}
+		for i, dev := range deviceResources {
+			deviceResources[i].score, _ = orcheEngine.GetScoreWithResource(dev.resource)
+		}
+		deviceScores = sortByScore(deviceResources)
+	} else {
+		deviceScores = sortByScore(orcheEngine.gatherDevicesScore(candidates, selfSelection))
+	}
+
+	if len(deviceScores) <= 0 || deviceScores[0].score == scoringmgr.InvalidScore {
+		log.Printf("[%s] %s couldn't find a device with a valid score", "RequestServiceCenterlized", ServiceNotFound)
+		return deviceInfo{}, errors.New(ServiceNotFound)
+	}
+
+	log.Println("[orchestrationapi] ", deviceScores)
+
+	return deviceScores[0], nil
 }
 
 func getExecCmds(execType string, requestServiceInfos []RequestServiceInfo) ([]string, error) {
@@ -442,10 +594,14 @@ func (orcheEngine orcheImpl) executeApp(endpoint, serviceName, requester string,
 	orcheEngine.serviceIns.Execute(endpoint, serviceName, requester, ifArgs, notiChan)
 }
 
-func (client *orcheClient) listenNotify() {
+func (client *orcheClient) listenNotify(notificationIns notification.Notification) {
 	select {
 	case str := <-client.notiChan:
 		log.Printf("[orchestrationapi] service status changed [appNames:%s][status:%s]\n", client.appName, str)
+		//forward notification to original requester
+		if client.forward.targetURL != "" {
+			notificationIns.InvokeNotification(client.forward.targetURL, client.forward.serviceId, str)
+		}
 	}
 }
 
@@ -460,10 +616,11 @@ func isLocalhost(endpoints1, endpoints2 []string) bool {
 	return false
 }
 
-func addServiceClient(clientID int, appName string) (client *orcheClient) {
+func addServiceClient(clientID int, appName string, forward forwardNotification) (client *orcheClient) {
 	// orcheClients[clientID].args = args
 	orcheClients[clientID].appName = appName
 	orcheClients[clientID].notiChan = make(chan string)
+	orcheClients[clientID].forward = forward
 
 	client = &orcheClients[clientID]
 	return

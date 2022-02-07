@@ -19,11 +19,12 @@
 package internalhandler
 
 import (
-	"github.com/lf-edge/edge-home-orchestration-go/internal/common/logmgr"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/lf-edge/edge-home-orchestration-go/internal/common/logmgr"
 
 	"github.com/lf-edge/edge-home-orchestration-go/internal/common/commandvalidator"
 	"github.com/lf-edge/edge-home-orchestration-go/internal/common/requestervalidator"
@@ -40,6 +41,9 @@ const logPrefix = "RestInternalInterface"
 type Handler struct {
 	isSetAPI bool
 	api      orchestrationapi.OrcheInternalAPI
+
+	isSetExternalAPI bool
+	externalApi      orchestrationapi.OrcheExternalAPI
 
 	helper resthelper.RestHelper
 
@@ -117,6 +121,11 @@ func (h *Handler) SetOrchestrationAPI(o orchestrationapi.OrcheInternalAPI) {
 	h.isSetAPI = true
 }
 
+func (h *Handler) SetOrchestrationExternalAPI(o orchestrationapi.OrcheExternalAPI) {
+	h.externalApi = o
+	h.isSetExternalAPI = true
+}
+
 // SetCertificateFilePath sets the file path for certificate
 func (h *Handler) SetCertificateFilePath(path string) {
 	rh := resthelper.GetHelperWithCertificate()
@@ -134,6 +143,10 @@ func (h *Handler) APIV1ServicemgrServicesPost(w http.ResponseWriter, r *http.Req
 	log.Printf("[%s] APIV1ServicemgrServicesPost", logPrefix)
 	if !h.isSetAPI {
 		log.Printf("[%s] does not set api", logPrefix)
+		h.helper.Response(w, nil, http.StatusServiceUnavailable)
+		return
+	} else if !h.isSetExternalAPI {
+		log.Printf("[%s] does not set external api", logPrefix)
 		h.helper.Response(w, nil, http.StatusServiceUnavailable)
 		return
 	} else if !h.IsSetKey {
@@ -186,7 +199,8 @@ func (h *Handler) APIV1ServicemgrServicesPost(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	h.api.ExecuteAppOnLocal(appInfo)
+	//h.api.ExecuteAppOnLocal(appInfo)
+	h.externalApi.RequestServiceCenterlized(appInfo)
 
 	respJSONMsg := make(map[string]interface{})
 	respJSONMsg["Status"] = servicemgrtypes.ConstServiceStatusStarted
