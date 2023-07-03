@@ -55,6 +55,7 @@ type requestHelper interface {
 	DoGet(targetURL string) (respBytes []byte, statusCode int, err error)
 	DoGetWithBody(targetURL string, bodybytes []byte) (respBytes []byte, statusCode int, err error)
 	DoPost(targetURL string, bodybytes []byte) (respBytes []byte, statusCode int, err error)
+	DoPut(targetURL string, bodybytes []byte) (respBytes []byte, statusCode int, err error)
 	DoDelete(targetURL string) (respBytes []byte, statusCode int, err error)
 }
 
@@ -68,8 +69,9 @@ type helperImpl struct {
 }
 
 var (
-	helper *helperImpl
-	log    = logmgr.GetInstance()
+	helper  *helperImpl
+	log     = logmgr.GetInstance()
+	authKey = "{serverAuthKey}"
 )
 
 func init() {
@@ -132,6 +134,7 @@ func (h helperImpl) DoGetWithBody(targetURL string, bodybytes []byte) (respBytes
 
 	// Content-Type Header
 	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("auth-key", authKey)
 
 	resp, err := h.c.Do(req)
 	if err != nil {
@@ -158,6 +161,39 @@ func (h helperImpl) DoPost(targetURL string, bodybytes []byte) (respBytes []byte
 	buff := bytes.NewBuffer(bodybytes)
 
 	req, err := http.NewRequest("POST", targetURL, buff)
+	if err != nil {
+		return
+	}
+
+	// Content-Type Header
+	req.Header.Add("Content-Type", "application/json")
+
+	resp, err := h.c.Do(req)
+	if err != nil {
+		return
+	}
+
+	defer resp.Body.Close()
+
+	statusCode = resp.StatusCode
+	respBytes, err = ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Println("read resp.Body failed !!", err)
+		return
+	}
+
+	return
+}
+
+// DoPut is for put request
+func (h helperImpl) DoPut(targetURL string, bodybytes []byte) (respBytes []byte, statusCode int, err error) {
+	if len(bodybytes) == 0 {
+		log.Printf("DoPut body length is zero(0) !!")
+	}
+
+	buff := bytes.NewBuffer(bodybytes)
+
+	req, err := http.NewRequest("PUT", targetURL, buff)
 	if err != nil {
 		return
 	}

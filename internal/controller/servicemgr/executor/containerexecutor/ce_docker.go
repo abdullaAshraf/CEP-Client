@@ -36,6 +36,7 @@ type CEImpl interface {
 	Wait(id string, condition container.WaitCondition) (<-chan container.ContainerWaitOKBody, <-chan error)
 	Logs(id string) (io.ReadCloser, error)
 	ImagePull(image string) error
+	Stats(id string) (io.ReadCloser, error)
 
 	// @Note : When below api is need to implements, it will be opened
 	// PS() ([]types.Container, error)
@@ -97,6 +98,14 @@ func (ce CEDocker) ImagePull(image string) (err error) {
 		io.Copy(os.Stdout, reader)
 	}
 
+	return
+}
+
+// Stats is to stream container stats
+func (ce CEDocker) Stats(id string) (stream io.ReadCloser, err error) {
+	stats, err := ce.cli.ContainerStats(ce.ctx, id, true)
+	log.Printf("stats : %+v\n", stats)
+	stream = stats.Body
 	return
 }
 

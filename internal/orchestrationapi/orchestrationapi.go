@@ -19,7 +19,9 @@ package orchestrationapi
 
 import (
 	"errors"
+	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,7 +67,7 @@ type deviceInfo struct {
 
 type forwardNotification struct {
 	targetURL string
-	serviceId float64
+	serviceId string
 }
 
 type orcheClient struct {
@@ -127,6 +129,8 @@ var (
 	helper dbhelper.MultipleBucketQuery
 
 	clusterUUID string = ""
+
+	forwardNotificationInfo = make(map[string]forwardNotification)
 )
 
 func init() {
@@ -144,18 +148,28 @@ func (orcheEngine *orcheImpl) SetupServerCommunication() {
 	}
 
 	clusterUUID = response["uuid"].(string)
-	orcheEngine.SetupCheckupCycle(response["cycle"].(string))
+	orcheEngine.SetupCycles(response["benchmarkCycle"].(string), response["assignmentCycle"].(string))
 }
 
-func (orcheEngine *orcheImpl) SetupCheckupCycle(cronCycleExpression string) {
+func (orcheEngine *orcheImpl) SetupCycles(benchmarkCycleExpression string, assignmentCycleExpression string) {
 	c := cron.New()
-	c.AddFunc(cronCycleExpression, func() {
+	c.AddFunc(assignmentCycleExpression, func() {
 		log.Println("Triggered checkup")
 		orcheEngine.CloudCheckup()
 	})
+	c.AddFunc(benchmarkCycleExpression, func() {
+		log.Println("Triggered Benchmarks update")
+		orcheEngine.CloudUpdateBenchmarks()
+	})
+	c.Start()
+	log.Printf("[orchestrationapi] assignment cron cycle: %s, entries:", assignmentCycleExpression)
+	log.Printf("[orchestrationapi] benchmarks cron cycle: %s, entries:", benchmarkCycleExpression)
+	for _, e := range c.Entries() {
+		log.Printf("%+v", e)
+	}
 }
 
-func (orcheEngine *orcheImpl) RequestServiceCloud(serviceName string, args []string, requesterId string) {
+func (orcheEngine *orcheImpl) RequestServiceCloud(serviceName string, args []string, requesterId string, forward forwardNotification) {
 	if !orcheEngine.Ready {
 		log.Printf("[%s] orcheEngine not ready", "RequestServiceCloud")
 		return
@@ -175,19 +189,19 @@ func (orcheEngine *orcheImpl) RequestServiceCloud(serviceName string, args []str
 	}
 
 	log.Println(executionUUID)
-	//TODO: keep executionUUID for notifications and update finish endpoint later
+	forwardNotificationInfo[executionUUID] = forward
 }
 
-func (orcheEngine *orcheImpl) CloudCheckup() (err error) {
+func (orcheEngine *orcheImpl) CloudUpdateBenchmarks() (err error) {
 	if !orcheEngine.Ready {
-		log.Printf("[%s] orcheEngine not ready", "CloudCheckup")
+		log.Printf("[%s] orcheEngine not ready", "CloudUpdateBenchmarks")
 		return
 	}
 
 	candidates, err := orcheEngine.getCandidate("", []string{"container"})
 
 	if err != nil {
-		log.Printf("[%s] error getting candidate %s", "RequestServiceCenterlized", err.Error())
+		log.Printf("[%s] error getting candidate %s", "CloudUpdateBenchmarks", err.Error())
 		return err
 	}
 
@@ -195,14 +209,17 @@ func (orcheEngine *orcheImpl) CloudCheckup() (err error) {
 	if len(deviceResources) <= 0 {
 		return errors.New("no suitable device found")
 	}
-	for i, dev := range deviceResources {
-		deviceResources[i].score, _ = orcheEngine.GetScoreWithResource(dev.resource)
-	}
 
 	benchmarks := make(map[string][]interface{})
 	log.Printf("[RequestService] CloudCheckup")
 	for index, candidate := range deviceResources {
-		benchmarks[candidate.id] = append(benchmarks[candidate.id], candidate.resource)
+		for key, value := range candidate.resource {
+			resource := map[string]interface{}{
+				"type":  key,
+				"value": value,
+			}
+			benchmarks[candidate.id] = append(benchmarks[candidate.id], resource)
+		}
 		log.Printf("[%d] Id       : %v", index, candidate.id)
 		log.Printf("[%d] Resource : %v", index, candidate.resource)
 		log.Printf("[%d] Score : %v", index, candidate.score)
@@ -214,18 +231,96 @@ func (orcheEngine *orcheImpl) CloudCheckup() (err error) {
 		"benchmarks": benchmarks,
 	}
 
+	response, err := orcheEngine.clientAPI.DoServerBenchmarksUpdate(requestBody)
+	if err != nil {
+		log.Println("[orchestrationapi] cannot checkup on server because of", err.Error())
+		return
+	}
+
+	log.Println(response, "CloudUpdateBenchmarks")
+	return nil
+}
+
+func (orcheEngine *orcheImpl) CloudCheckup() (err error) {
+	if !orcheEngine.Ready {
+		log.Printf("[%s] orcheEngine not ready", "CloudCheckup")
+		return
+	}
+
+	candidates, err := orcheEngine.getCandidate("", []string{"container"})
+
+	if err != nil {
+		log.Printf("[%s] error getting candidate %s", "CloudCheckup", err.Error())
+		return err
+	}
+
+	requestBody := map[string]interface{}{
+		"clusterId": clusterUUID,
+	}
+
 	response, err := orcheEngine.clientAPI.DoServerCheckup(requestBody)
 	if err != nil {
 		log.Println("[orchestrationapi] cannot checkup on server because of", err.Error())
 		return
 	}
 
-	for key, element := range response {
-		log.Printf("[%v] Id       : %v", key, element)
-		//TODO: call executeApp to pass recieved tasks to the selected device
-		//orcheEngine.executeApp()
+	for _, serviceInterface := range response["services"].([]interface{}) {
+		log.Printf("%v", serviceInterface)
+		service, _ := serviceInterface.(map[string]interface{})
+
+		//TODO: call finished endpoint on service done
+		atomic.AddInt32(&orchClientID, 1)
+		handle := int(orchClientID)
+		forward := forwardNotification{"CLOUD", service["uuid"].(string)}
+		serviceClient := addServiceClient(handle, service["name"].(string), forward)
+		go serviceClient.listenNotify(orcheEngine.notificationIns, orcheEngine.clientAPI)
+
+		var endpoint string
+		for _, device := range candidates {
+			if device.Id == service["device"].(string) {
+				if len(device.Endpoint) > 0 {
+					endpoint = device.Endpoint[0]
+				}
+			}
+		}
+
+		if endpoint == "" {
+			log.Printf("[orchestrationapi] can't execute service %s, no device found with id %s\n", service["uuid"].(string), service["device"].(string))
+		} else {
+			var commands []string
+			for _, command := range service["command"].([]interface{}) {
+				commands = append(commands, command.(string))
+			}
+			orcheEngine.executeApp(
+				endpoint,
+				service["name"].(string),
+				service["uuid"].(string),
+				commands,
+				serviceClient.notiChan,
+			)
+		}
 	}
-	//TODO: call finished endpoint on service done
+
+	// loop over notifications and forward them to original requesters
+	for _, notificationInterface := range response["notifications"].([]interface{}) {
+		log.Printf("%v", notificationInterface)
+		notification, _ := notificationInterface.(map[string]interface{})
+		serviceUuid := notification["uuid"].(string)
+		forward := forwardNotificationInfo[serviceUuid]
+
+		//TODO: get status and pass it instead of hardcoded Success
+		log.Printf("[orchestrationapi] service status changed [uuid:%s][status:%s]\n", serviceUuid, "Success")
+		//forward notification to original requester
+		if forward.targetURL != "" {
+			serviceId, err := strconv.ParseFloat(forward.serviceId, 64)
+			if err != nil {
+				log.Printf("[orchestrationapi] cannot checkup on server while mapping notification serviceId: %s\n", forward.serviceId, err.Error())
+			}
+			orcheEngine.notificationIns.InvokeNotification(forward.targetURL, serviceId, "Success")
+		}
+
+		delete(forwardNotificationInfo, serviceUuid)
+	}
 
 	return nil
 }
@@ -240,14 +335,6 @@ func (orcheEngine *orcheImpl) RequestServiceCenterlized(appInfo map[string]inter
 		return
 	}
 
-	atomic.AddInt32(&orchClientID, 1)
-
-	handle := int(orchClientID)
-
-	forward := forwardNotification{appInfo["NotificationTargetURL"].(string), appInfo["ServiceID"].(float64)}
-	serviceClient := addServiceClient(handle, serviceName, forward)
-	go serviceClient.listenNotify(orcheEngine.notificationIns)
-
 	executionTypes := make([]string, 0)
 
 	args := make([]string, 0)
@@ -256,11 +343,20 @@ func (orcheEngine *orcheImpl) RequestServiceCenterlized(appInfo map[string]inter
 	}
 	executionTypes = append(executionTypes, args[len(args)-1])
 
+	forward := forwardNotification{appInfo["NotificationTargetURL"].(string), fmt.Sprintf("%f", appInfo["ServiceID"].(float64))}
+
 	device, err := orcheEngine.scheduleService(serviceName, executionTypes, "device", true)
 	if err != nil {
-		orcheEngine.RequestServiceCloud(serviceName, args, appInfo["Requester"].(string))
+		orcheEngine.RequestServiceCloud(serviceName, args, appInfo["Requester"].(string), forward)
 		return
 	}
+
+	atomic.AddInt32(&orchClientID, 1)
+
+	handle := int(orchClientID)
+
+	serviceClient := addServiceClient(handle, serviceName, forward)
+	go serviceClient.listenNotify(orcheEngine.notificationIns, orcheEngine.clientAPI)
 
 	orcheEngine.executeApp(
 		device.endpoint,
@@ -288,7 +384,7 @@ func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) Respons
 	handle := int(orchClientID)
 
 	serviceClient := addServiceClient(handle, serviceInfo.ServiceName, forwardNotification{})
-	go serviceClient.listenNotify(orcheEngine.notificationIns)
+	go serviceClient.listenNotify(orcheEngine.notificationIns, orcheEngine.clientAPI)
 
 	executionTypes := make([]string, 0)
 	var scoringType string
@@ -298,7 +394,18 @@ func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) Respons
 	}
 
 	device, err := orcheEngine.scheduleService(serviceInfo.ServiceName, executionTypes, scoringType, serviceInfo.SelfSelection)
-	if err != nil {
+	if true || err != nil {
+		args, err := getExecCmds("container", serviceInfo.ServiceInfo)
+		if err != nil {
+			log.Println(err.Error())
+			return ResponseService{
+				Message:          err.Error(),
+				ServiceName:      serviceInfo.ServiceName,
+				RemoteTargetInfo: TargetInfo{},
+			}
+		}
+		args = append(args, "container")
+		orcheEngine.RequestServiceCloud(serviceInfo.ServiceName, args, serviceInfo.ServiceRequester, forwardNotification{})
 		return ResponseService{
 			Message:          err.Error(),
 			ServiceName:      serviceInfo.ServiceName,
@@ -561,9 +668,12 @@ func (orcheEngine orcheImpl) gatherDevicesResource(candidates []dbhelper.Executi
 				if !selfSelection {
 					return
 				}
-				resource, err = orcheEngine.GetResource(info.Value)
+				resource, err = orcheEngine.GetResource("Cloud")
 			} else {
 				resource, err = orcheEngine.clientAPI.DoGetResourceRemoteDevice(info.Value, cand.Endpoint[0])
+
+				headResource, _ := orcheEngine.GetResource("Cloud")
+				resource["rtt"] = headResource["rtt"].(float64) + resource["rtt"].(float64)
 			}
 
 			if err != nil {
@@ -594,13 +704,26 @@ func (orcheEngine orcheImpl) executeApp(endpoint, serviceName, requester string,
 	orcheEngine.serviceIns.Execute(endpoint, serviceName, requester, ifArgs, notiChan)
 }
 
-func (client *orcheClient) listenNotify(notificationIns notification.Notification) {
+func (client *orcheClient) listenNotify(notificationIns notification.Notification, clientAPI client.Clienter) {
 	select {
 	case str := <-client.notiChan:
 		log.Printf("[orchestrationapi] service status changed [appNames:%s][status:%s]\n", client.appName, str)
 		//forward notification to original requester
-		if client.forward.targetURL != "" {
-			notificationIns.InvokeNotification(client.forward.targetURL, client.forward.serviceId, str)
+		if client.forward.targetURL == "CLOUD" {
+			requestBody := map[string]interface{}{
+				"clusterId": clusterUUID,
+				"uuid":      client.forward.serviceId,
+			}
+			_, err := clientAPI.DoServerServiceNotification(requestBody)
+			if err != nil {
+				log.Printf("[orchestrationapi] error sending notification to cloud server: %s\n", client.forward.serviceId, err.Error())
+			}
+		} else if client.forward.targetURL != "" {
+			serviceId, err := strconv.ParseFloat(client.forward.serviceId, 64)
+			if err != nil {
+				log.Printf("[orchestrationapi] local notification serviceId: %s\n", client.forward.serviceId, err.Error())
+			}
+			notificationIns.InvokeNotification(client.forward.targetURL, serviceId, str)
 		}
 	}
 }

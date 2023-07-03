@@ -91,12 +91,33 @@ func (ScoringImpl) GetResource(ID string) (resource map[string]interface{}, err 
 	}
 	resource["cpuFreq"] = cpuFreq
 
+	memAvailable, err := resourceIns.GetResource(resourceutil.MemAvailable)
+	if err != nil {
+		resource["error"] = InvalidScore
+		return
+	}
+	resource["memAvailable"] = memAvailable
+
+	memFree, err := resourceIns.GetResource(resourceutil.MemFree)
+	if err != nil {
+		resource["error"] = InvalidScore
+		return
+	}
+	resource["memFree"] = memFree
+
 	netBandwidth, err := resourceIns.GetResource(resourceutil.NetBandwidth)
 	if err != nil {
 		resource["error"] = InvalidScore
 		return
 	}
 	resource["netBandwidth"] = netBandwidth
+
+	netMBps, err := resourceIns.GetResource(resourceutil.NetMBps)
+	if err != nil {
+		resource["error"] = InvalidScore
+		return
+	}
+	resource["netMBps"] = netMBps
 
 	resourceIns.SetDeviceID(ID)
 	rtt, err := resourceIns.GetResource(resourceutil.NetRTT)

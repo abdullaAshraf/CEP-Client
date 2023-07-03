@@ -18,7 +18,6 @@
 package discoverymgr
 
 import (
-	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"net"
 	"os"
@@ -26,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v2"
 
 	errors "github.com/lf-edge/edge-home-orchestration-go/internal/common/errors"
 	"github.com/lf-edge/edge-home-orchestration-go/internal/common/logmgr"
@@ -431,6 +432,8 @@ func getServiceList() (serviceList []string, err error) {
 }
 
 func startServer(deviceUUID string, platform string, executionType string) {
+	registerGlobalIDs()
+
 	deviceDetectionRoutine()
 
 	deviceID, hostName, Text := setDeviceArgument(deviceUUID, platform, executionType)
@@ -459,6 +462,13 @@ func startServer(deviceUUID string, platform string, executionType string) {
 	setConfigurationDB(confInfo)
 	setNetworkDB(netInfo)
 	setServiceDB(serviceInfo)
+}
+
+func registerGlobalIDs() {
+	cloudNetInfo := networkdb.NetworkInfo{}
+	cloudNetInfo.ID = "Cloud"
+	cloudNetInfo.IPv4 = []string{"{serverUrl}"}
+	netQuery.Set(cloudNetInfo)
 }
 
 //NotifyMNEDCBroadcastServer registers to MNEDC

@@ -174,6 +174,7 @@ func orchestrationInit() error {
 	}
 	ehandle := externalhandler.GetHandler()
 	ehandle.SetOrchestrationAPI(externalapi)
+	ihandle.SetOrchestrationExternalAPI(externalapi)
 	ehandle.SetCipher(dummy.GetCipher(cipherKeyFilePath))
 	restEdgeRouter.Add(ehandle)
 

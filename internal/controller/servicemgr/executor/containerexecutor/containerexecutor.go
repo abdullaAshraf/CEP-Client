@@ -98,6 +98,14 @@ func (c *ContainerExecutor) Execute(s executor.ServiceExecutionInfo) error {
 		return err
 	}
 
+	stream, err := c.ceImplIns.Stats(resp.ID)
+	log.Printf("stats : %+v\n", stream)
+	if err != nil {
+		log.Println(logPrefix, err.Error())
+	} else {
+		stdcopy.StdCopy(os.Stdout, os.Stderr, stream)
+	}
+
 	// @Note : get log of container
 	out, err := c.ceImplIns.Logs(resp.ID)
 	if err != nil {

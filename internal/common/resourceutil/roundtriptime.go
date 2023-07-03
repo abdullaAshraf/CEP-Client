@@ -56,7 +56,11 @@ func processRTT() {
 				ch := make(chan float64, totalCount)
 				for _, ip := range netInfo.IPv4 {
 					go func(targetIP string) {
-						ch <- checkRTT(targetIP)
+						if netInfo.ID == "Cloud" {
+							ch <- checkUrlRTT(targetIP)
+						} else {
+							ch <- checkRTT(targetIP)
+						}
 					}(ip)
 				}
 				go func(info netDB.NetworkInfo) {
@@ -86,6 +90,10 @@ func processRTT() {
 func checkRTT(ip string) (rtt float64) {
 	targetURL := helper.MakeTargetURL(ip, internalPort, pingAPI)
 
+	return checkUrlRTT(targetURL)
+}
+
+func checkUrlRTT(targetURL string) (rtt float64) {
 	reqTime := time.Now()
 	_, _, err := helper.DoGet(targetURL)
 	if err != nil {

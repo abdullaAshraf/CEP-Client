@@ -41,7 +41,9 @@ type Clienter interface {
 	// for cloudServer
 	DoRegisterClusterWithServer() (respMsg map[string]interface{}, err error)
 	DoExecuteCloudScheduler(sericeRequest map[string]interface{}) (executionUUID string, err error)
-	DoServerCheckup(benchmarks map[string]interface{}) (respMsg map[string]interface{}, err error)
+	DoServerCheckup(requestBody map[string]interface{}) (respMsg map[string]interface{}, err error)
+	DoServerBenchmarksUpdate(benchmarks map[string]interface{}) (response string, err error)
+	DoServerServiceNotification(requestBody map[string]interface{}) (response string, err error)
 }
 
 // Setter interface

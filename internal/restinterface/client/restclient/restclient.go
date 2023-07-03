@@ -19,6 +19,7 @@
 package restclient
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -41,11 +42,18 @@ type restClientImpl struct {
 	cipher.HasCipher
 }
 
+type ServiceRequest struct {
+	name    string
+	command []string
+	device  string
+	uuid    string
+}
+
 const (
 	constWellknownPort = 56001
 	constInternalPort  = 56002
 	logPrefix          = "[restclient]"
-	cloudServerHost    = "https://peaceful-brushlands-26273.herokuapp.com"
+	cloudServerHost    = "{serverUrl}"
 )
 
 var (
@@ -83,9 +91,9 @@ func (c restClientImpl) DoRegisterClusterWithServer() (respMsg map[string]interf
 
 	respMsg, err = c.Key.DecryptByteToJSON(respBytes)
 	if err != nil {
-		return respMsg, errors.New(logPrefix + " can not decrytion " + err.Error())
+		return respMsg, errors.New(logPrefix + " can not decryption " + err.Error())
 	}
-	log.Printf("%s respMsg From [%v] : %v", logPrefix, respMsg)
+	log.Printf("%s respMsg: %v", logPrefix, respMsg)
 
 	return
 }
@@ -113,17 +121,17 @@ func (c restClientImpl) DoExecuteCloudScheduler(sericeRequest map[string]interfa
 
 	respMsg, err := c.Key.DecryptByteToJSON(respBytes)
 	if err != nil {
-		return executionUUID, errors.New(logPrefix + " can not decrytion " + err.Error())
+		return executionUUID, errors.New(logPrefix + " can not decryption " + err.Error())
 	}
-	log.Printf("%s respMsg From [%v] : %v", logPrefix, respMsg)
+	log.Printf("%s respMsg: %v", logPrefix, respMsg)
 
-	//executionUUID = respMsg;
+	executionUUID = respMsg["uuid"].(string)
 
 	return
 }
 
-// DoServerCheckup sends update about clister devices and benchmarks, and recieve services assigned by the scheduler for those devices if any
-func (c restClientImpl) DoServerCheckup(benchmarks map[string]interface{}) (respMsg map[string]interface{}, err error) {
+// DoServerCheckup get services assigned by the scheduler for those devices if any
+func (c restClientImpl) DoServerCheckup(requestBody map[string]interface{}) (respMsg map[string][]interface{}, err error) {
 	log.Printf("%s DoServerCheckup :", logPrefix)
 	if !c.IsSetKey {
 		return respMsg, errors.New(logPrefix + " does not set key")
@@ -133,7 +141,7 @@ func (c restClientImpl) DoServerCheckup(benchmarks map[string]interface{}) (resp
 
 	targetURL := cloudServerHost + restapi
 
-	encryptBytes, err := c.Key.EncryptJSONToByte(benchmarks)
+	encryptBytes, err := c.Key.EncryptJSONToByte(requestBody)
 	if err != nil {
 		return respMsg, errors.New(logPrefix + " can not encryption " + err.Error())
 	}
@@ -143,11 +151,64 @@ func (c restClientImpl) DoServerCheckup(benchmarks map[string]interface{}) (resp
 		return respMsg, errors.New(logPrefix + " post return error")
 	}
 
-	respMsg, err = c.Key.DecryptByteToJSON(respBytes)
+	err = json.Unmarshal(respBytes, &respMsg)
 	if err != nil {
-		return respMsg, errors.New(logPrefix + " can not decrytion " + err.Error())
+		return respMsg, errors.New(logPrefix + " can not decryption " + err.Error())
 	}
-	log.Printf("%s respMsg From [%v] : %v", logPrefix, respMsg)
+
+	log.Printf("%s respMsg: %v", logPrefix, respMsg)
+
+	return
+}
+
+// DoServerBenchmarksUpdate sends update about cluster devices and benchmarks
+func (c restClientImpl) DoServerBenchmarksUpdate(benchmarks map[string]interface{}) (response string, err error) {
+	log.Printf("%s DoServerBenchmarksUpdate :", logPrefix)
+	if !c.IsSetKey {
+		return response, errors.New(logPrefix + " does not set key")
+	}
+
+	restapi := "/cluster/benchmark"
+
+	targetURL := cloudServerHost + restapi
+
+	encryptBytes, err := c.Key.EncryptJSONToByte(benchmarks)
+	if err != nil {
+		return response, errors.New(logPrefix + " can not encryption " + err.Error())
+	}
+
+	respBytes, code, err := c.helper.DoPost(targetURL, encryptBytes)
+	if err != nil || code != http.StatusOK {
+		return response, errors.New(logPrefix + " post return error")
+	}
+
+	log.Printf("%s respMsg: %v", logPrefix, respBytes)
+
+	return
+}
+
+// DoServerServiceNotification sends notification when a service assigned to a device in this cluster finished processing
+func (c restClientImpl) DoServerServiceNotification(reqBody map[string]interface{}) (response string, err error) {
+	log.Printf("%s DoServerServiceNotification :", logPrefix)
+	if !c.IsSetKey {
+		return response, errors.New(logPrefix + " does not set key")
+	}
+
+	restapi := "/service/finished"
+
+	targetURL := cloudServerHost + restapi
+
+	encryptBytes, err := c.Key.EncryptJSONToByte(reqBody)
+	if err != nil {
+		return response, errors.New(logPrefix + " can not encryption " + err.Error())
+	}
+
+	respBytes, code, err := c.helper.DoPut(targetURL, encryptBytes)
+	if err != nil || code != http.StatusOK {
+		return response, errors.New(logPrefix + " post return error")
+	}
+
+	log.Printf("%s respMsg: %v", logPrefix, respBytes)
 
 	return
 }
